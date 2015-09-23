@@ -1,7 +1,8 @@
 #!/usr/bin/env make
 
 all: photons.py Makefile
-	./photons.py
+	mkdir -p gif
+	./photons.py --tanh=2e-1 --wiki
 
 .PHONY: clean
 clean:

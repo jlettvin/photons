@@ -6,8 +6,10 @@ Usage:
     photons.py \
 [(-d <decay>|--decay=<decay>)] \
 [(-m <max>|--maximum=<max>)] \
-[(-r|--radius)] \
+[(-r <r>|--radius=<r>)] \
+[(-w|--wiki)] \
 [(-t <thr>|--threshold=<thr>)] \
+[--tanh=<coeff>] \
 [(-v|--verbose)]
     photons.py (-h|--help)
     photons.py --version
@@ -18,7 +20,9 @@ Options:
     -e <ext>, --extension=<ext>             Specify extension [default: gif]
     -m <max>, --maximum=<max>               Specify photon count[default: 255]
     -f <filename>, --filename=<filename>    Specify file to transform
-    -r, --radius                            kernel radius [default: 11]
+    -r <r>, --radius=<r>                    kernel radius [default: 11]
+    -w --wiki                               Make web page describing photons
+    --tanh=<coeff>                          tanh intensity [default: 0.0]
     -v --verbose                            Show details about execution
     -h --help                               Show this screen
     --version                               Show version
@@ -27,11 +31,13 @@ Options:
 
 from cPickle import (load, dump)
 from random import (seed, random, randrange)
-from scipy import (zeros, ones, array, maximum, exp, sqrt)
+from scipy import (zeros, ones, array, maximum, exp, sqrt, tanh)
 from scipy.misc import (imsave, toimage)
 from scipy.ndimage.interpolation import(zoom)
 from itertools import (product)
 from subprocess import (Popen, PIPE)
+
+import re
 
 from w3.HTML4_01.Html import (Html)
 from font.BIOSfont.BIOSfont import (FONT)
@@ -43,6 +49,7 @@ def execTAGs(s):
     return toExec
 
 def save(data, P, M, fmt, font, **kw):
+    coeff = float(kw.get('--tanh', 0.0))
     count = "%07d" % (P)
     annotation = ["%02x" % (ord(c)) for c in count.lstrip('0')]
     if kw.get('--verbose', False):
@@ -55,15 +62,83 @@ def save(data, P, M, fmt, font, **kw):
         #image = toimage(data, cmax=256, cmin=0, mode='RGB')
     #else:
         #image = toimage(data, mode='RGB')
-    image = toimage(data, mode='RGB')
+    if coeff != 0.0:
+        temp = tanh(coeff * data)
+        image = toimage(temp, mode='RGB')
+    else:
+        image = toimage(data, mode='RGB')
     image = toimage(zoom(image, (4.0, 4.0, 1.0), order=0), mode='RGB')
     filename = fmt % (count)
     image.save(filename)
     return filename
 
+def final(data, X, Y, **kw):
+    decay = float(kw.get('--decay', '5e0'))
+    threshold = int(kw.get('--threshold', '230'))
+    maximum = int(kw.get('--maximum', '255'))
+
+    print 'decay', decay, kw
+    data[:,:,1] = (
+        exp(-decay*data[:,:,1].astype(float)/256.0)
+        *256).astype(int)
+    image = toimage(data, mode='RGB')
+    image.save('response.gif')
+    G = array(data[:,:,1], float)
+    data[:,:,:] = 0
+    for y in range(2, Y-2):
+        for x in range(2, X-2):
+            if False:
+                a = G[y-1:y+2,x-1:x+2].sum() / 9
+                c = G[y,x]
+                r = int(127 + (c - a)/2.0)
+                if r > threshold:
+                    data[y,x,1] = 255
+            else:
+                # (-2,+2)(-1,+2)(+0,+2)(+1,+2)(+2,+2)
+                # (-2,+1)(-1,+1)(+0,+1)(+1,+1)(+2,+1)
+                # (-2,+0)(-1,+0)(+0,+0)(+1,+0)(+2,+0)
+                # (-2,-1)(-1,-1)(+0,-1)(+1,-1)(+2,-1)
+                # (-2,-2)(-1,-2)(+0,-2)(+1,-2)(+2,-2)
+                xy = x * y
+                ax, ay = abs(x), abs(y)
+                axy = abs(xy)
+                center = G[y,x]
+                if ay < 2:
+                    # Along X axis
+                    surround = (
+                        (G[y+1,x-1]+G[y+1,x+1]) +
+                        (G[y,x-1]+G[y,x+1]) +
+                        (G[y-1,x-1]+G[y-1,x+1])
+                        ) / 6.0
+                elif ax < 2:
+                    # Along Y axis
+                    surround = (
+                        (G[y-1,x+1]+G[y+1,x+1]) +
+                        (G[y-1,x]+G[y+1,x]) +
+                        (G[y-1,x-1]+G[y+1,x-1])
+                        ) / 6.0
+                elif xy < 0:
+                    # Along down diagonal
+                    surround = (
+                        (G[y+0,x+1]+G[y-1,x+0])+
+                        (G[y-1,x+1]+G[y+1,x-1])+
+                        (G[y+0,x-1]+G[y+1,x+0])+
+                        (G[y+0,x-2]+G[y+2,x+0])+
+                        (G[y-2,x+0]+G[y+0,x+2])
+                        ) / 10.0
+                else:
+                    # Along up diagonal
+                    surround = (
+                        G[y-1,x-1]+G[y+1,x-2]+G[y-2,x+0]+
+                        G[y+1,x+1]+G[y+2,x+0]+G[y+0,x+2]+
+                        G[y+1,x-1]+G[y-1,x+1]+G[y+1,x+0]+G[y+0,x+1]
+                        ) / 10.0
+                data[y,x,1] = int((center-surround) > threshold) * 255
+    image = toimage(data, mode='RGB')
+    image.save('laplace.gif')
+
 def makeGIFs(HTML, **kw):
     ftype = kw.get('<ext>', 'gif')
-    decay = float(kw.get('--decay', '5e0'))
     threshold = int(kw.get('--threshold', '230'))
     maximum = int(kw.get('--maximum', '255'))
     style = """\
@@ -118,14 +193,14 @@ A single photon from a single point source may be absorbed almost anywhere.
             x, y = [randrange(d) for d in (X, Y)]  # Choose a random position.
             if random() < Is[y][x]:  # If probability is within range
                 if data[y][x][1] >= maximum:
-                    filename = save(data, P, M, fmt, font)
+                    filename = save(data, P, M, fmt, font, **kw)
                     last = True
                 if not last:
                     data[y][x][1] += 1  # Add 1 photon to the image
                     M = max(M, data[y][x][1])
                     # M is used as a maximum intensity for annotations.
                 P += 1  # and increase the absorption count.
-                filename = save(data, P, M, fmt, font)  # save this image
+                filename = save(data, P, M, fmt, font, **kw)  # save this image
                 rows = 8
                 imgs = 4
                 if P <= imgs*rows:  # or last:
@@ -145,65 +220,7 @@ A single photon from a single point source may be absorbed almost anywhere.
                     if not P&3:
                         BR()
             if last:
-                print 'decay', decay, kw
-                data[:,:,1] = (
-                    exp(-decay*data[:,:,1].astype(float)/256.0)
-                    *256).astype(int)
-                image = toimage(data, mode='RGB')
-                image.save('response.gif')
-                G = array(data[:,:,1], float)
-                data[:,:,:] = 0
-                for y in range(2, Y-2):
-                    for x in range(2, X-2):
-                        if False:
-                            a = G[y-1:y+2,x-1:x+2].sum() / 9
-                            c = G[y,x]
-                            r = int(127 + (c - a)/2.0)
-                            if r > threshold:
-                                data[y,x,1] = 255
-                        else:
-                            # (-2,+2)(-1,+2)(+0,+2)(+1,+2)(+2,+2)
-                            # (-2,+1)(-1,+1)(+0,+1)(+1,+1)(+2,+1)
-                            # (-2,+0)(-1,+0)(+0,+0)(+1,+0)(+2,+0)
-                            # (-2,-1)(-1,-1)(+0,-1)(+1,-1)(+2,-1)
-                            # (-2,-2)(-1,-2)(+0,-2)(+1,-2)(+2,-2)
-                            xy = x * y
-                            ax, ay = abs(x), abs(y)
-                            axy = abs(xy)
-                            center = G[y,x]
-                            if ay < 2:
-                                # Along X axis
-                                surround = (
-                                    (G[y+1,x-1]+G[y+1,x+1]) +
-                                    (G[y,x-1]+G[y,x+1]) +
-                                    (G[y-1,x-1]+G[y-1,x+1])
-                                    ) / 6.0
-                            elif ax < 2:
-                                # Along Y axis
-                                surround = (
-                                    (G[y-1,x+1]+G[y+1,x+1]) +
-                                    (G[y-1,x]+G[y+1,x]) +
-                                    (G[y-1,x-1]+G[y+1,x-1])
-                                    ) / 6.0
-                            elif xy < 0:
-                                # Along down diagonal
-                                surround = (
-                                    (G[y+0,x+1]+G[y-1,x+0])+
-                                    (G[y-1,x+1]+G[y+1,x-1])+
-                                    (G[y+0,x-1]+G[y+1,x+0])+
-                                    (G[y+0,x-2]+G[y+2,x+0])+
-                                    (G[y-2,x+0]+G[y+0,x+2])
-                                    ) / 10.0
-                            else:
-                                # Along up diagonal
-                                surround = (
-                                    G[y-1,x-1]+G[y+1,x-2]+G[y-2,x+0]+
-                                    G[y+1,x+1]+G[y+2,x+0]+G[y+0,x+2]+
-                                    G[y+1,x-1]+G[y-1,x+1]+G[y+1,x+0]+G[y+0,x+1]
-                                    ) / 10.0
-                            data[y,x,1] = int((center-surround) > threshold) * 255
-                image = toimage(data, mode='RGB')
-                image.save('laplace.gif')
+                final(data, X, Y, **kw)
                 break
     gifname = "photons.%d.%d.gif" % (maximum, threshold)
     cmd = "convert -delay 1 -loop 0 " + starname + " " + gifname
@@ -222,9 +239,46 @@ def image(HTML, filename, XY=(100,100)):
             height='%dpx' % (Y),
        )
 
+def wiki():
+    HTML = Html()
+    wiki = """
+Visual photons are typically produced/consumed
+by electrons jumping from one energy state to another
+in a volume typically at atomic scale (1&Aring;).
+The path taken between production and consumption
+cannot be known.
+The relative probability of photon consumption
+on an image plane is calculable.
+Variations in medium density are responsible
+for the shape of the probability curve.
+Refraction arises from increases/decreases in density.
+Diffraction arises from boundaries between
+opaque and transparent medium.
+Standard formulae are published for these probability curves.
+
+Small aperture images formed when photon counts are low
+appear to violate laws of optics.
+Words like "scatter" and "noise" are used indiscriminately.
+Scatter results from photon probabilities inconsistent with optics.
+Noise results from differential photon transduction or non-photon events.
+"""
+    exec(execTAGs("HEAD,BODY,STYLE,DIV,TABLE,TR,TD,IMG,P,text"))
+    with HEAD():
+        pass
+    with BODY():
+        pattern = re.compile(r'(\r\n){2,}|(\n\r){2,}|(\r){2,}|(\n){2,}')
+        for paragraph in pattern.split(wiki):
+            with P():
+                text(paragraph)
+    with open('wiki.html', 'w') as target:
+        print>>target, HTML
+
 def main():
     from docopt import (docopt)
     kw = docopt(__doc__, version="0.0.1")
+
+    if kw.get('--wiki', False):
+        wiki()
 
     seed()
 
